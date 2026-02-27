@@ -4,6 +4,7 @@ let settings = {
 };
 
 let currentEmails = [];
+let currentConversationId = null;
 
 document.addEventListener('DOMContentLoaded', async () => {
     // Check for settings in Missive's secure store
@@ -85,9 +86,11 @@ async function handleConversationChange(ids) {
         setStatus('Select an email to view Notion links.');
         clearResults();
         clearEmails();
+        currentConversationId = null;
         return;
     }
 
+    currentConversationId = ids[0];
     setStatus('Loading emails from conversation...');
     clearResults();
     
@@ -312,22 +315,119 @@ async function searchNotion(contact) {
             const desktopUrl = `notion://www.notion.so/${rawId}`;
             const webUrl = page.url;
             
-            const a = document.createElement('a');
-            a.href = desktopUrl;
-            a.className = 'page-link';
+            const card = document.createElement('div');
+            card.className = 'page-link'; // reusing the class for styling
+            card.style.cursor = 'default';
             
-            a.innerHTML = `
+            card.innerHTML = `
                 <div class="title">${title}</div>
-                <div style="font-size: 11px; color: #586069; margin-top: 4px;">
-                    <a href="${webUrl}" target="_blank" style="color: var(--missive-blue); text-decoration: none;" onclick="event.stopPropagation();">Open in Web Browser</a>
+                <div style="display: flex; gap: 8px; margin-top: 8px;">
+                    <button class="btn-action" onclick="openNotionPage('${webUrl}')" style="background: var(--missive-blue); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;">Open in Notion</button>
+                    <button class="btn-action" id="save-btn-${page.id}" onclick="saveEmailToNotion('${page.id}')" style="background: #e1e4e8; color: #24292e; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;">Save Email to Page</button>
                 </div>
             `;
             
-            resultsContainer.appendChild(a);
+            resultsContainer.appendChild(card);
         });
 
     } catch (error) {
         console.error('Notion Search Error:', error);
         setStatus(`Error searching Notion: ${error.message}`);
+    }
+}
+
+function openNotionPage(url) {
+    Missive.openURL(url);
+}
+
+async function saveEmailToNotion(pageId) {
+    const btn = document.getElementById(`save-btn-${pageId}`);
+    btn.innerText = 'Saving...';
+    btn.disabled = true;
+
+    try {
+        if (!currentConversationId) throw new Error("No active conversation.");
+        
+        const conversations = await Missive.fetchConversations([currentConversationId]);
+        if (!conversations || conversations.length === 0) throw new Error("Could not load conversation.");
+        const conversation = conversations[0];
+        const latestMessage = conversation.latest_message;
+        
+        if (!latestMessage) throw new Error("No messages found in this conversation.");
+
+        let emailBodyText = latestMessage.preview || "No preview available";
+        const subject = latestMessage.subject || conversation.subject || "No Subject";
+        const fromAddress = latestMessage.from_field ? latestMessage.from_field.address : "Unknown Sender";
+        const dateStr = new Date(latestMessage.delivered_at * 1000).toLocaleString();
+
+        const proxyUrl = 'https://corsproxy.io/?'; 
+        const targetUrl = `https://api.notion.com/v1/blocks/${pageId}/children`;
+
+        const requestBody = {
+            children: [
+                {
+                    object: 'block',
+                    type: 'heading_3',
+                    heading_3: {
+                        rich_text: [{ type: 'text', text: { content: 'Email Logged: ' + subject } }]
+                    }
+                },
+                {
+                    object: 'block',
+                    type: 'paragraph',
+                    paragraph: {
+                        rich_text: [{ type: 'text', text: { content: `From: ${fromAddress} on ${dateStr}` } }]
+                    }
+                },
+                {
+                    object: 'block',
+                    type: 'quote',
+                    quote: {
+                        rich_text: [{ type: 'text', text: { content: emailBodyText.substring(0, 1990) } }]
+                    }
+                }
+            ]
+        };
+
+        const response = await fetch(proxyUrl + encodeURIComponent(targetUrl), {
+            method: 'PATCH',
+            headers: {
+                'Authorization': `Bearer ${settings.apiKey}`,
+                'Notion-Version': '2022-06-28',
+                'Content-Type': 'application/json',
+                'x-requested-with': 'XMLHttpRequest'
+            },
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.message || `API Error: ${response.status}`);
+        }
+
+        btn.innerText = 'Saved!';
+        btn.style.background = '#28a745';
+        btn.style.color = 'white';
+        
+        setTimeout(() => {
+            btn.innerText = 'Save Email to Page';
+            btn.style.background = '#e1e4e8';
+            btn.style.color = '#24292e';
+            btn.disabled = false;
+        }, 3000);
+
+    } catch (err) {
+        console.error("Save to Notion Error:", err);
+        btn.innerText = 'Error';
+        btn.style.background = '#cb2431';
+        btn.style.color = 'white';
+        alert("Failed to save email: " + err.message);
+        
+        setTimeout(() => {
+            btn.innerText = 'Save Email to Page';
+            btn.style.background = '#e1e4e8';
+            btn.style.color = '#24292e';
+            btn.disabled = false;
+        }, 3000);
     }
 }
