@@ -22,7 +22,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (settings.apiKey && settings.databaseIds.length > 0) {
             handleConversationChange(ids);
         }
-    }, { retroactive: true });
+    });
+    
+    // Initial fetch if a conversation is already open when the iframe loads
+    Missive.fetchConversations().then(conversations => {
+        if (conversations && conversations.length > 0 && settings.apiKey) {
+            handleConversationChange([conversations[0].id]);
+        }
+    }).catch(e => {
+        // Silently catch error if fetchConversations fails without IDs
+    });
 });
 
 async function loadSettings() {
@@ -83,11 +92,21 @@ async function handleConversationChange(ids) {
     clearResults();
     
     try {
+        // Need to pass array to fetchConversations
         const conversations = await Missive.fetchConversations(ids);
         
+        if (!conversations || conversations.length === 0) {
+            setStatus('Could not load conversation data.');
+            return;
+        }
+
         // Use Missive's built-in helper to extract all emails from the conversations
         const emailFields = Missive.getEmailAddresses(conversations);
-        currentEmails = [...new Set(emailFields.map(field => field.address))];
+        if (emailFields && emailFields.length > 0) {
+            currentEmails = [...new Set(emailFields.map(field => field.address))];
+        } else {
+            currentEmails = [];
+        }
         
         if (currentEmails.length > 0) {
             renderEmails(currentEmails);
@@ -102,7 +121,7 @@ async function handleConversationChange(ids) {
         
     } catch (error) {
         console.error('Error fetching conversation details:', error);
-        setStatus('Error loading conversation context.');
+        setStatus('Error loading conversation context. Check Developer Tools.');
     }
 }
 
