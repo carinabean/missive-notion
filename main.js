@@ -22,14 +22,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (settings.apiKey && settings.databaseIds.length > 0) {
             handleConversationChange(ids);
         }
-    });
-    
-    // Initial fetch if a conversation is already open when the iframe loads
-    Missive.fetch('conversations').then(conversations => {
-        if (conversations && conversations.length > 0 && settings.apiKey) {
-            handleConversationChange([conversations[0].id]);
-        }
-    });
+    }, { retroactive: true });
 });
 
 async function loadSettings() {
@@ -64,11 +57,8 @@ async function saveSettings() {
     await loadSettings();
     showApp();
     
-    // Refresh conversation view to trigger a search
-    const conversations = await Missive.fetch('conversations');
-    if (conversations && conversations.length > 0) {
-        handleConversationChange([conversations[0].id]);
-    }
+    // Reload to re-trigger the conversation hook cleanly
+    Missive.reload();
 }
 
 function showSettings() {
@@ -93,10 +83,11 @@ async function handleConversationChange(ids) {
     clearResults();
     
     try {
-        const conversationId = ids[0];
-        const messages = await Missive.fetch(`conversations/${conversationId}/messages`);
+        const conversations = await Missive.fetchConversations(ids);
         
-        currentEmails = extractEmailsFromMessages(messages);
+        // Use Missive's built-in helper to extract all emails from the conversations
+        const emailFields = Missive.getEmailAddresses(conversations);
+        currentEmails = [...new Set(emailFields.map(field => field.address))];
         
         if (currentEmails.length > 0) {
             renderEmails(currentEmails);
@@ -113,29 +104,6 @@ async function handleConversationChange(ids) {
         console.error('Error fetching conversation details:', error);
         setStatus('Error loading conversation context.');
     }
-}
-
-function extractEmailsFromMessages(messages) {
-    const emails = new Set();
-    
-    if (!messages || messages.length === 0) return [];
-    
-    // Look at the most recent messages first
-    const reversedMessages = [...messages].reverse();
-    
-    reversedMessages.forEach(msg => {
-        if (msg.fromField && msg.fromField.address) {
-            emails.add(msg.fromField.address);
-        }
-        if (msg.toFields && msg.toFields.length > 0) {
-            msg.toFields.forEach(f => emails.add(f.address));
-        }
-        if (msg.ccFields && msg.ccFields.length > 0) {
-            msg.ccFields.forEach(f => emails.add(f.address));
-        }
-    });
-    
-    return Array.from(emails);
 }
 
 function renderEmails(emails) {
