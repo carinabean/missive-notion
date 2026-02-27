@@ -103,7 +103,24 @@ async function handleConversationChange(ids) {
         // Use Missive's built-in helper to extract all emails from the conversations
         const emailFields = Missive.getEmailAddresses(conversations);
         if (emailFields && emailFields.length > 0) {
-            currentEmails = [...new Set(emailFields.map(field => field.address))];
+            // Filter out our own domain
+            const filteredEmails = emailFields.filter(field => !field.address.toLowerCase().includes('recruitomics.com'));
+            
+            // Map to objects holding both name and address
+            const uniqueContacts = [];
+            const seenAddresses = new Set();
+            
+            filteredEmails.forEach(field => {
+                if (!seenAddresses.has(field.address)) {
+                    seenAddresses.add(field.address);
+                    uniqueContacts.push({
+                        address: field.address,
+                        name: field.name || ''
+                    });
+                }
+            });
+            
+            currentEmails = uniqueContacts;
         } else {
             currentEmails = [];
         }
@@ -125,15 +142,15 @@ async function handleConversationChange(ids) {
     }
 }
 
-function renderEmails(emails) {
+function renderEmails(contacts) {
     const container = document.getElementById('emails-container');
     container.innerHTML = '';
     
-    emails.forEach(email => {
+    contacts.forEach(contact => {
         const pill = document.createElement('div');
         pill.className = 'email-pill';
-        pill.innerText = email;
-        pill.onclick = () => searchNotion(email);
+        pill.innerText = contact.name ? `${contact.name} <${contact.address}>` : contact.address;
+        pill.onclick = () => searchNotion(contact);
         container.appendChild(pill);
     });
 }
@@ -150,15 +167,16 @@ function clearEmails() {
     document.getElementById('emails-container').innerHTML = '';
 }
 
-async function searchNotion(email) {
-    setStatus(`Searching Notion for: ${email}...`);
+async function searchNotion(contact) {
+    const searchTerm = contact.name || contact.address;
+    setStatus(`Searching Notion for: ${searchTerm}...`);
     clearResults();
     
     const resultsContainer = document.getElementById('results');
     
     // Highlight active pill
     document.querySelectorAll('.email-pill').forEach(pill => {
-        if (pill.innerText === email) {
+        if (pill.innerText.includes(contact.address)) {
             pill.style.background = 'var(--missive-blue, #0366d6)';
             pill.style.color = 'white';
         } else {
@@ -168,57 +186,116 @@ async function searchNotion(email) {
     });
     
     try {
-        // We use a CORS proxy because Notion API blocks direct browser calls
         const proxyUrl = 'https://corsproxy.io/?'; 
-        const targetUrl = 'https://api.notion.com/v1/search';
+        let allResults = [];
         
-        const response = await fetch(proxyUrl + encodeURIComponent(targetUrl), {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${settings.apiKey}`,
-                'Notion-Version': '2022-06-28',
-                'Content-Type': 'application/json',
-                'x-requested-with': 'XMLHttpRequest'
-            },
-            body: JSON.stringify({
-                query: email,
-                filter: { value: 'page', property: 'object' },
-                page_size: 20
-            })
-        });
-
-        if (!response.ok) {
-            const errData = await response.json().catch(() => ({}));
-            throw new Error(errData.message || `API Error: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        
-        if (!data.results || data.results.length === 0) {
-            setStatus(`No matches found anywhere in Notion for ${email}. (Note: Notion's global search only looks at page titles and page content, not custom properties like an "Email" field).`);
-            return;
-        }
-
-        // Filter the search results so we only show pages that live inside the databases the user configured
-        const filteredResults = data.results.filter(page => {
-            if (page.parent && page.parent.type === 'database_id') {
-                const pageDbId = page.parent.database_id.replace(/-/g, '');
-                return settings.databaseIds.some(configuredId => configuredId.replace(/-/g, '') === pageDbId);
+        // Search each configured database directly
+        for (let i = 0; i < settings.databaseIds.length; i++) {
+            const dbId = settings.databaseIds[i].replace(/-/g, '');
+            const targetUrl = `https://api.notion.com/v1/databases/${dbId}/query`;
+            
+            // Build a query that looks for either the email address in an Email property, OR the name in a Title property
+            let orConditions = [
+                {
+                    property: "Email",
+                    email: {
+                        equals: contact.address
+                    }
+                }
+            ];
+            
+            if (contact.name) {
+                // Assuming the primary column is usually named "Name" or "Candidate Name"
+                // For a robust generic query we might have to just rely on the API. 
+                // Let's search the global text for the name as well to catch variations in column names.
             }
-            return false;
-        });
+
+            const response = await fetch(proxyUrl + encodeURIComponent(targetUrl), {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${settings.apiKey}`,
+                    'Notion-Version': '2022-06-28',
+                    'Content-Type': 'application/json',
+                    'x-requested-with': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({
+                    filter: {
+                        or: [
+                            {
+                                property: "Email", // Assumption: Your email column is named exactly "Email"
+                                email: {
+                                    equals: contact.address
+                                }
+                            }
+                        ]
+                    }
+                })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                if (data.results) {
+                    allResults = allResults.concat(data.results);
+                }
+            } else {
+                // If it fails (maybe the column isn't named "Email"), fallback to global search for the Name/Email string
+                console.warn(`Direct DB query failed for ${dbId}, falling back to global search`);
+            }
+        }
         
-        if (filteredResults.length === 0) {
-            setStatus(`Found ${data.results.length} matches in Notion, but none of them are in your specified databases. Check your Database IDs in Settings.`);
+        // Fallback: If DB query found nothing, do a global search for the name/email
+        if (allResults.length === 0) {
+            const globalTargetUrl = 'https://api.notion.com/v1/search';
+            const globalResponse = await fetch(proxyUrl + encodeURIComponent(globalTargetUrl), {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${settings.apiKey}`,
+                    'Notion-Version': '2022-06-28',
+                    'Content-Type': 'application/json',
+                    'x-requested-with': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({
+                    query: contact.name || contact.address,
+                    filter: { value: 'page', property: 'object' },
+                    page_size: 20
+                })
+            });
+
+            if (globalResponse.ok) {
+                const data = await globalResponse.json();
+                if (data.results) {
+                    // Filter down to just our databases
+                    allResults = data.results.filter(page => {
+                        if (page.parent && page.parent.type === 'database_id') {
+                            const pageDbId = page.parent.database_id.replace(/-/g, '');
+                            return settings.databaseIds.some(configuredId => configuredId.replace(/-/g, '') === pageDbId);
+                        }
+                        return false;
+                    });
+                }
+            }
+        }
+        
+        if (allResults.length === 0) {
+            setStatus(`No matches found for ${contact.name || contact.address} in your configured databases.`);
             return;
         }
         
-        setStatus(`Found ${filteredResults.length} matches for ${email}.`);
+        setStatus(`Found ${allResults.length} matches.`);
         
-        filteredResults.forEach(page => {
+        // Remove duplicates if the global search and db search both ran
+        const uniqueResults = [];
+        const seenIds = new Set();
+        allResults.forEach(page => {
+            if (!seenIds.has(page.id)) {
+                seenIds.add(page.id);
+                uniqueResults.push(page);
+            }
+        });
+
+        uniqueResults.forEach(page => {
             let title = 'Untitled';
             if (page.properties) {
-                // Find a property of type 'title'
                 for (let prop in page.properties) {
                     if (page.properties[prop].type === 'title') {
                         const titleArr = page.properties[prop].title;
