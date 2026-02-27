@@ -194,6 +194,11 @@ async function searchNotion(email) {
         
         const data = await response.json();
         
+        if (!data.results || data.results.length === 0) {
+            setStatus(`No matches found anywhere in Notion for ${email}. (Note: Notion's global search only looks at page titles and page content, not custom properties like an "Email" field).`);
+            return;
+        }
+
         // Filter the search results so we only show pages that live inside the databases the user configured
         const filteredResults = data.results.filter(page => {
             if (page.parent && page.parent.type === 'database_id') {
@@ -204,7 +209,7 @@ async function searchNotion(email) {
         });
         
         if (filteredResults.length === 0) {
-            setStatus(`No matches found in Notion for ${email}.`);
+            setStatus(`Found ${data.results.length} matches in Notion, but none of them are in your specified databases. Check your Database IDs in Settings.`);
             return;
         }
         
